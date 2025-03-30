@@ -41,8 +41,8 @@ kataribe: timestamp=$(shell TZ=Asia/Tokyo date "+%Y%m%d-%H%M%S")
 kataribe:
 	mkdir -p ~/kataribe-logs
 	sudo cp /var/log/nginx/access.log /tmp/last-access.log && sudo chmod 0666 /tmp/last-access.log
-	cat /tmp/last-access.log | kataribe -conf kataribe.toml > ~/kataribe-logs/$timestamp.log
-	cat ~/kataribe-logs/$timestamp.log | grep --after-context 20 "Top 20 Sort By Total"
+	cat /tmp/last-access.log | kataribe -conf kataribe.toml > ~/kataribe-logs/$(timestamp).log
+	cat ~/kataribe-logs/$(timestamp).log | grep --after-context 20 "Top 20 Sort By Total"
 
 bench: 
 	ssh isucon-bench "cd bench && ./bench -target-addr 172.31.36.27:443 -target-url=https://t.isucon.local"
