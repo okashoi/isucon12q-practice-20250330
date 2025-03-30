@@ -1270,7 +1270,6 @@ func playerHandler(c echo.Context) error {
 	}
 	defer db.Close() // データベース接続を確実に閉じる
 	defer tx.Rollback()
-	defer tx.Rollback()
 
 	// N+1問題を解消するために、JOINを使用して一括取得
 	type PlayerScoreWithCompetition struct {
