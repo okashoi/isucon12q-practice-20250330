@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
-	"github.com/gofrs/flock"
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -137,9 +136,9 @@ func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 func Run() {
 	http.DefaultServeMux.Handle("/debug/fgprof", fgprof.Handler())
 	go func() {
-    	if err := http.ListenAndServe(":6060", nil); err != nil {
-        	log.Fatalf("Server error: %v", err)
-    	}
+		if err := http.ListenAndServe(":6060", nil); err != nil {
+			log.Fatalf("Server error: %v", err)
+		}
 	}()
 	e := echo.New()
 	e.Debug = true
@@ -437,13 +436,13 @@ func beginTxByTenantID(ctx context.Context, tenantID int64) (*sqlx.Tx, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error connectToTenantDB: %w", err)
 	}
-	
+
 	tx, err := tenantDB.BeginTxx(ctx, nil)
 	if err != nil {
 		tenantDB.Close()
 		return nil, fmt.Errorf("error beginTx: %w", err)
 	}
-	
+
 	return tx, nil
 }
 
@@ -598,7 +597,7 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 		// スコアが登録されている参加者
 		billingMap[pid] = "player"
 	}
-	
+
 	// トランザクションをコミット
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("error commit transaction: %w", err)
@@ -1141,7 +1140,7 @@ func competitionScoreHandler(c echo.Context) error {
 			)
 		}
 	}
-	
+
 	// トランザクションをコミット
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("error commit transaction: %w", err)
@@ -1289,7 +1288,7 @@ func playerHandler(c echo.Context) error {
 		}
 		pss = append(pss, ps)
 	}
-	
+
 	// トランザクションをコミット
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("error commit transaction: %w", err)
@@ -1437,7 +1436,7 @@ func competitionRankingHandler(c echo.Context) error {
 			RowNum:            ps.RowNum,
 		})
 	}
-	
+
 	// トランザクションをコミット
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("error commit transaction: %w", err)
