@@ -18,4 +18,5 @@ mysql -u"$ISUCON_DB_USER" \
 
 # SQLiteのデータベースを初期化
 rm -f ../tenant_db/*.db
+rm -f ../tenant_db/*.lock
 cp -r ../../initial_data/*.db ../tenant_db/
