@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1062,12 +1063,6 @@ func competitionScoreHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid CSV headers")
 	}
 
-	// / DELETEしたタイミングで参照が来ると空っぽのランキングになるのでロックする
-	fl, err := flockByTenantID(v.tenantID)
-	if err != nil {
-		return fmt.Errorf("error flockByTenantID: %w", err)
-	}
-	defer fl.Close()
 	var rowNum int64
 	playerScoreRows := []PlayerScoreRow{}
 	for {
@@ -1117,7 +1112,15 @@ func competitionScoreHandler(c echo.Context) error {
 		})
 	}
 
-	if _, err := tenantDB.ExecContext(
+	// トランザクション内でスコアを更新
+	tx, err := tenantDB.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("error BeginTxx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 既存のスコアを削除
+	if _, err := tx.ExecContext(
 		ctx,
 		"DELETE FROM player_score WHERE tenant_id = ? AND competition_id = ?",
 		v.tenantID,
@@ -1126,7 +1129,7 @@ func competitionScoreHandler(c echo.Context) error {
 		return fmt.Errorf("error Delete player_score: tenantID=%d, competitionID=%s, %w", v.tenantID, competitionID, err)
 	}
 
-	// バルクインサートの実装
+	// 新しいスコアを挿入
 	if len(playerScoreRows) > 0 {
 		valueStrings := make([]string, 0, len(playerScoreRows))
 		valueArgs := make([]interface{}, 0, len(playerScoreRows)*8)
@@ -1147,9 +1150,13 @@ func competitionScoreHandler(c echo.Context) error {
 		stmt := fmt.Sprintf("INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) VALUES %s",
 			strings.Join(valueStrings, ","))
 
-		if _, err := tenantDB.ExecContext(ctx, stmt, valueArgs...); err != nil {
+		if _, err := tx.ExecContext(ctx, stmt, valueArgs...); err != nil {
 			return fmt.Errorf("error bulk insert player_score: %w", err)
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("error Commit: %w", err)
 	}
 
 	return c.JSON(http.StatusOK, SuccessResult{
@@ -1253,31 +1260,16 @@ func playerHandler(c echo.Context) error {
 		}
 		return fmt.Errorf("error retrievePlayer: %w", err)
 	}
-	cs := []CompetitionRow{}
-	if err := tenantDB.SelectContext(
-		ctx,
-		&cs,
-		"SELECT * FROM competition WHERE tenant_id = ? ORDER BY created_at ASC",
-		v.tenantID,
-	); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("error Select competition: %w", err)
-	}
 
-	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(v.tenantID)
+	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでトランザクションを使用
+	tx, err := tenantDB.BeginTxx(ctx, &sql.TxOptions{
+		ReadOnly: true,
+	})
 	if err != nil {
-		return fmt.Errorf("error flockByTenantID: %w", err)
+		return fmt.Errorf("error BeginTxx: %w", err)
 	}
-	defer fl.Close()
+	defer tx.Rollback()
 
-	// N+1問題を解消するために、JOINを使用して一括取得
-	type PlayerScoreWithCompetition struct {
-		CompetitionID    string `db:"competition_id"`
-		CompetitionTitle string `db:"competition_title"`
-		Score            int64  `db:"score"`
-	}
-
-	// JOINを使用して、プレイヤースコアと大会情報を一括取得
 	query := `
 		SELECT
 			c.id AS competition_id,
@@ -1301,7 +1293,7 @@ func playerHandler(c echo.Context) error {
 	`
 
 	playerScores := []PlayerScoreWithCompetition{}
-	if err := tenantDB.SelectContext(
+	if err := tx.SelectContext(
 		ctx,
 		&playerScores,
 		query,
@@ -1309,6 +1301,10 @@ func playerHandler(c echo.Context) error {
 		v.tenantID,
 	); err != nil {
 		return fmt.Errorf("error Select player_score with competition: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("error Commit: %w", err)
 	}
 
 	// 結果を構築
@@ -1376,7 +1372,7 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 
 	// 大会の存在確認
-	competition, err := retrieveCompetition(ctx, tenantDB, competitionID)
+	comp, err := retrieveCompetition(ctx, tenantDB, competitionID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return echo.NewHTTPError(http.StatusNotFound, "competition not found")
@@ -1409,87 +1405,93 @@ func competitionRankingHandler(c echo.Context) error {
 		}
 	}
 
-	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(v.tenantID)
+	tx, err := tenantDB.BeginTxx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("error flockByTenantID: %w", err)
+		return fmt.Errorf("error BeginTxx: %w", err)
 	}
-	defer fl.Close()
+	defer tx.Rollback()
 
-	// N+1問題を解消するために、プレイヤー情報を一括取得
-	// SQLでソートも行う
-	type PlayerScoreWithRank struct {
-		PlayerID    string `db:"player_id"`
-		Score       int64  `db:"score"`
-		RowNum      int64  `db:"row_num"`
-		DisplayName string `db:"display_name"`
-		RankNum     int64  `db:"rank_num"`
-	}
-
-	// 最新のスコアを取得し、スコア降順、row_num昇順でソート
-	query := `
-		WITH ranked_scores AS (
-			SELECT
-				ps.player_id,
-				ps.score,
-				ps.row_num,
-				p.display_name,
-				ROW_NUMBER() OVER (ORDER BY ps.score DESC, ps.row_num ASC) as rank_num
-			FROM (
-				SELECT
-					player_id,
-					MAX(row_num) as max_row_num
-				FROM
-					player_score
-				WHERE
-					tenant_id = ? AND competition_id = ?
-				GROUP BY
-					player_id
-			) latest
-			JOIN player_score ps ON ps.player_id = latest.player_id AND ps.row_num = latest.max_row_num
-			JOIN player p ON p.id = ps.player_id
-			WHERE
-				ps.tenant_id = ? AND ps.competition_id = ?
-		)
-		SELECT * FROM ranked_scores
-		WHERE rank_num > ?
-		ORDER BY rank_num
-		LIMIT 100
-	`
-
-	rankedScores := []PlayerScoreWithRank{}
-	if err := tenantDB.SelectContext(
+	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
+	if _, err := tx.ExecContext(
 		ctx,
-		&rankedScores,
-		query,
-		tenant.ID, competitionID, tenant.ID, competitionID, rankAfter,
+		"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? FOR UPDATE",
+		v.tenantID,
+		competitionID,
 	); err != nil {
-		return fmt.Errorf("error Select player_score with rank: %w", err)
+		return fmt.Errorf("error Select player_score: %w", err)
 	}
 
-	// ランキング結果を構築
-	pagedRanks := make([]CompetitionRank, 0, len(rankedScores))
-	for _, rs := range rankedScores {
-		pagedRanks = append(pagedRanks, CompetitionRank{
-			Rank:              rs.RankNum,
-			Score:             rs.Score,
-			PlayerID:          rs.PlayerID,
-			PlayerDisplayName: rs.DisplayName,
+	// スコアを取得
+	scoredPlayerIDs := []string{}
+	playerScores := make(map[string]int64)
+	playerScoreRows := []PlayerScoreRow{}
+	if err := tx.SelectContext(
+		ctx,
+		&playerScoreRows,
+		"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? ORDER BY row_num ASC",
+		v.tenantID,
+		competitionID,
+	); err != nil {
+		return fmt.Errorf("error Select player_score: %w", err)
+	}
+	for _, ps := range playerScoreRows {
+		scoredPlayerIDs = append(scoredPlayerIDs, ps.PlayerID)
+		playerScores[ps.PlayerID] = ps.Score
+	}
+
+	// プレイヤー情報を取得
+	playerRows := []PlayerRow{}
+	if len(scoredPlayerIDs) > 0 {
+		query, params, err := sqlx.In(
+			"SELECT * FROM player WHERE tenant_id = ? AND id IN (?)",
+			v.tenantID,
+			scoredPlayerIDs,
+		)
+		if err != nil {
+			return fmt.Errorf("error sqlx.In: %w", err)
+		}
+		if err := tx.SelectContext(
+			ctx,
+			&playerRows,
+			query,
+			params...,
+		); err != nil {
+			return fmt.Errorf("error Select player: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("error Commit: %w", err)
+	}
+
+	// 最後にソート
+	ranks := make([]CompetitionRank, 0, len(playerRows))
+	for _, p := range playerRows {
+		ranks = append(ranks, CompetitionRank{
+			Score:                playerScores[p.ID],
+			PlayerID:             p.ID,
+			PlayerName:           p.DisplayName,
+			PlayerIsDisqualified: p.IsDisqualified,
 		})
 	}
+	sort.Slice(ranks, func(i, j int) bool {
+		if ranks[i].Score == ranks[j].Score {
+			return ranks[i].PlayerID < ranks[j].PlayerID
+		}
+		return ranks[i].Score > ranks[j].Score
+	})
 
-	res := SuccessResult{
+	return c.JSON(http.StatusOK, SuccessResult{
 		Status: true,
 		Data: CompetitionRankingHandlerResult{
 			Competition: CompetitionDetail{
-				ID:         competition.ID,
-				Title:      competition.Title,
-				IsFinished: competition.FinishedAt.Valid,
+				ID:         comp.ID,
+				Title:      comp.Title,
+				IsFinished: comp.FinishedAt.Valid,
 			},
-			Ranks: pagedRanks,
+			Ranks: ranks,
 		},
-	}
-	return c.JSON(http.StatusOK, res)
+	})
 }
 
 type CompetitionsHandlerResult struct {
