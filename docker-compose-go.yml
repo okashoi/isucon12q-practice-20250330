@@ -2,7 +2,7 @@ services:
   webapp:
     build: ./go
     environment:
-      ISUCON_DB_HOST: 172.31.36.27
+      ISUCON_DB_HOST: 172.31.43.99
       ISUCON_DB_PORT: 3306
       ISUCON_DB_USER: isucon
       ISUCON_DB_PASSWORD: isucon
