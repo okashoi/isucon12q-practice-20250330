@@ -51,3 +51,5 @@ pprof:
 	curl -sSf "http://localhost:6060/debug/fgprof?seconds=$(time)" > $(prof_file)
 	go tool pprof $(prof_file)
 
+bench:
+	ssh isucon-s3 "cd bench && ./bench -target-addr 172.31.36.27:443 -target-url=https://t.isucon.local"
