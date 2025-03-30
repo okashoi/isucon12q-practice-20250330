@@ -33,6 +33,7 @@ import (
 
 const (
 	tenantDBSchemaFilePath = "../sql/tenant/10_schema.sql"
+	tenantDBIndexFilePath  = "../sql/tenant/20_index.sql"
 	initializeScript       = "../sql/init.sh"
 	cookieName             = "isuports_session"
 
@@ -92,10 +93,18 @@ func connectToTenantDB(id int64) (*sqlx.DB, error) {
 func createTenantDB(id int64) error {
 	p := tenantDBPath(id)
 
+	// スキーマを適用
 	cmd := exec.Command("sh", "-c", fmt.Sprintf("sqlite3 %s < %s", p, tenantDBSchemaFilePath))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to exec sqlite3 %s < %s, out=%s: %w", p, tenantDBSchemaFilePath, string(out), err)
 	}
+
+	// インデックスを適用
+	cmd = exec.Command("sh", "-c", fmt.Sprintf("sqlite3 %s < %s", p, tenantDBIndexFilePath))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to exec sqlite3 %s < %s, out=%s: %w", p, tenantDBIndexFilePath, string(out), err)
+	}
+
 	return nil
 }
 
@@ -1116,17 +1125,30 @@ func competitionScoreHandler(c echo.Context) error {
 	); err != nil {
 		return fmt.Errorf("error Delete player_score: tenantID=%d, competitionID=%s, %w", v.tenantID, competitionID, err)
 	}
-	for _, ps := range playerScoreRows {
-		if _, err := tenantDB.NamedExecContext(
-			ctx,
-			"INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) VALUES (:id, :tenant_id, :player_id, :competition_id, :score, :row_num, :created_at, :updated_at)",
-			ps,
-		); err != nil {
-			return fmt.Errorf(
-				"error Insert player_score: id=%s, tenant_id=%d, playerID=%s, competitionID=%s, score=%d, rowNum=%d, createdAt=%d, updatedAt=%d, %w",
-				ps.ID, ps.TenantID, ps.PlayerID, ps.CompetitionID, ps.Score, ps.RowNum, ps.CreatedAt, ps.UpdatedAt, err,
-			)
 
+	// バルクインサートの実装
+	if len(playerScoreRows) > 0 {
+		valueStrings := make([]string, 0, len(playerScoreRows))
+		valueArgs := make([]interface{}, 0, len(playerScoreRows)*8)
+
+		for _, ps := range playerScoreRows {
+			valueStrings = append(valueStrings, "(?, ?, ?, ?, ?, ?, ?, ?)")
+			valueArgs = append(valueArgs,
+				ps.ID,
+				ps.TenantID,
+				ps.PlayerID,
+				ps.CompetitionID,
+				ps.Score,
+				ps.RowNum,
+				ps.CreatedAt,
+				ps.UpdatedAt)
+		}
+
+		stmt := fmt.Sprintf("INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) VALUES %s",
+			strings.Join(valueStrings, ","))
+
+		if _, err := tenantDB.ExecContext(ctx, stmt, valueArgs...); err != nil {
+			return fmt.Errorf("error bulk insert player_score: %w", err)
 		}
 	}
 
@@ -1652,6 +1674,24 @@ func initializeHandler(c echo.Context) error {
 	if err != nil {
 		return fmt.Errorf("error exec.Command: %s %e", string(out), err)
 	}
+
+	// 既存のテナントDBにインデックスを適用
+	tenantDBDir := getEnv("ISUCON_TENANT_DB_DIR", "../tenant_db")
+	files, err := os.ReadDir(tenantDBDir)
+	if err != nil {
+		return fmt.Errorf("error reading tenant DB directory: %w", err)
+	}
+
+	for _, file := range files {
+		if !file.IsDir() && strings.HasSuffix(file.Name(), ".db") {
+			dbPath := filepath.Join(tenantDBDir, file.Name())
+			cmd := exec.Command("sh", "-c", fmt.Sprintf("sqlite3 %s < %s", dbPath, tenantDBIndexFilePath))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("failed to apply index to %s: %s, %w", dbPath, string(out), err)
+			}
+		}
+	}
+
 	res := InitializeHandlerResult{
 		Lang: "go",
 	}
