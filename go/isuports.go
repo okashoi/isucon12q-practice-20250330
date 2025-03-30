@@ -539,7 +539,7 @@ type VisitHistoryRow struct {
 	TenantID      int64  `db:"tenant_id"`
 	CompetitionID string `db:"competition_id"`
 	CreatedAt     int64  `db:"created_at"`
-	UpdatedAt     int64  `db:"updated_at"`
+	//UpdatedAt     int64  `db:"updated_at"`
 }
 
 type VisitHistorySummaryRow struct {
