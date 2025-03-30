@@ -137,9 +137,9 @@ func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 func Run() {
 	http.DefaultServeMux.Handle("/debug/fgprof", fgprof.Handler())
 	go func() {
-    	if err := http.ListenAndServe(":6060", nil); err != nil {
-        	log.Fatalf("Server error: %v", err)
-    	}
+		if err := http.ListenAndServe(":6060", nil); err != nil {
+			log.Fatalf("Server error: %v", err)
+		}
 	}()
 	e := echo.New()
 	e.Debug = true
@@ -1352,7 +1352,7 @@ func competitionRankingHandler(c echo.Context) error {
 
 	if _, err := adminDB.ExecContext(
 		ctx,
-		"INSERT INTO visit_history (player_id, tenant_id, competition_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+		"INSERT INTO visit_history (player_id, tenant_id, competition_id, created_at) VALUES (?, ?, ?, ?)",
 		v.playerID, tenant.ID, competitionID, now, now,
 	); err != nil {
 		return fmt.Errorf(
