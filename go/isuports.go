@@ -21,7 +21,6 @@ import (
 	"github.com/felixge/fgprof"
 
 	"github.com/go-sql-driver/mysql"
-	"github.com/gofrs/flock"
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -440,21 +439,14 @@ type PlayerScoreRow struct {
 	UpdatedAt     int64  `db:"updated_at"`
 }
 
-// 排他ロックのためのファイル名を生成する
+// 排他ロックのためのファイル名を生成する関数を削除
 func lockFilePath(id int64) string {
-	tenantDBDir := getEnv("ISUCON_TENANT_DB_DIR", "../tenant_db")
-	return filepath.Join(tenantDBDir, fmt.Sprintf("%d.lock", id))
+	return ""
 }
 
-// 排他ロックする
-func flockByTenantID(tenantID int64) (*flock.Flock, error) {
-	p := lockFilePath(tenantID)
-
-	fl := flock.New(p)
-	if err := fl.Lock(); err != nil {
-		return nil, fmt.Errorf("error flock.Lock: path=%s, %w", p, err)
-	}
-	return fl, nil
+// 排他ロックする関数を削除
+func flockByTenantID(tenantID int64) (io.Closer, error) {
+	return nil, nil
 }
 
 type TenantsAddHandlerResult struct {
@@ -583,13 +575,6 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 		billingMap[vh.PlayerID] = "visitor"
 	}
 
-	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(tenantID)
-	if err != nil {
-		return nil, fmt.Errorf("error flockByTenantID: %w", err)
-	}
-	defer fl.Unlock()
-
 	// スコアを登録した参加者のIDを取得する
 	scoredPlayerIDs := []string{}
 	if err := tenantDB.SelectContext(
@@ -696,8 +681,15 @@ func tenantsBillingHandler(c echo.Context) error {
 				return fmt.Errorf("failed to connectToTenantDB: %w", err)
 			}
 			defer tenantDB.Close()
+
+			tx, err := tenantDB.Beginx()
+			if err != nil {
+				return fmt.Errorf("failed to start transaction: %w", err)
+			}
+			defer tx.Rollback()
+
 			cs := []CompetitionRow{}
-			if err := tenantDB.SelectContext(
+			if err := tx.SelectContext(
 				ctx,
 				&cs,
 				"SELECT * FROM competition WHERE tenant_id=?",
@@ -706,12 +698,17 @@ func tenantsBillingHandler(c echo.Context) error {
 				return fmt.Errorf("failed to Select competition: %w", err)
 			}
 			for _, comp := range cs {
-				report, err := billingReportByCompetition(ctx, tenantDB, t.ID, comp.ID)
+				report, err := billingReportByCompetition(ctx, tx, t.ID, comp.ID)
 				if err != nil {
 					return fmt.Errorf("failed to billingReportByCompetition: %w", err)
 				}
 				tb.BillingYen += report.BillingYen
 			}
+
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("failed to commit transaction: %w", err)
+			}
+
 			tenantBillings = append(tenantBillings, tb)
 			return nil
 		}(t)
@@ -1062,12 +1059,13 @@ func competitionScoreHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid CSV headers")
 	}
 
-	// / DELETEしたタイミングで参照が来ると空っぽのランキングになるのでロックする
-	fl, err := flockByTenantID(v.tenantID)
+	// トランザクションを使用して一貫性を担保
+	tx, err := tenantDB.Beginx()
 	if err != nil {
-		return fmt.Errorf("error flockByTenantID: %w", err)
+		return fmt.Errorf("error starting transaction: %w", err)
 	}
-	defer fl.Unlock()
+	defer tx.Rollback()
+
 	var rowNum int64
 	playerScoreRows := []PlayerScoreRow{}
 	for {
@@ -1083,7 +1081,7 @@ func competitionScoreHandler(c echo.Context) error {
 			return fmt.Errorf("row must have two columns: %#v", row)
 		}
 		playerID, scoreStr := row[0], row[1]
-		if _, err := retrievePlayer(ctx, tenantDB, playerID); err != nil {
+		if _, err := retrievePlayer(ctx, tx, playerID); err != nil {
 			// 存在しない参加者が含まれている
 			if errors.Is(err, sql.ErrNoRows) {
 				return echo.NewHTTPError(
@@ -1117,7 +1115,7 @@ func competitionScoreHandler(c echo.Context) error {
 		})
 	}
 
-	if _, err := tenantDB.ExecContext(
+	if _, err := tx.ExecContext(
 		ctx,
 		"DELETE FROM player_score WHERE tenant_id = ? AND competition_id = ?",
 		v.tenantID,
@@ -1147,9 +1145,13 @@ func competitionScoreHandler(c echo.Context) error {
 		stmt := fmt.Sprintf("INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) VALUES %s",
 			strings.Join(valueStrings, ","))
 
-		if _, err := tenantDB.ExecContext(ctx, stmt, valueArgs...); err != nil {
+		if _, err := tx.ExecContext(ctx, stmt, valueArgs...); err != nil {
 			return fmt.Errorf("error bulk insert player_score: %w", err)
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("error committing transaction: %w", err)
 	}
 
 	return c.JSON(http.StatusOK, SuccessResult{
@@ -1181,8 +1183,15 @@ func billingHandler(c echo.Context) error {
 	}
 	defer tenantDB.Close()
 
+	// トランザクションを使用して一貫性を担保
+	tx, err := tenantDB.Beginx()
+	if err != nil {
+		return fmt.Errorf("error starting transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	cs := []CompetitionRow{}
-	if err := tenantDB.SelectContext(
+	if err := tx.SelectContext(
 		ctx,
 		&cs,
 		"SELECT * FROM competition WHERE tenant_id=? ORDER BY created_at DESC",
@@ -1192,11 +1201,15 @@ func billingHandler(c echo.Context) error {
 	}
 	tbrs := make([]BillingReport, 0, len(cs))
 	for _, comp := range cs {
-		report, err := billingReportByCompetition(ctx, tenantDB, v.tenantID, comp.ID)
+		report, err := billingReportByCompetition(ctx, tx, v.tenantID, comp.ID)
 		if err != nil {
 			return fmt.Errorf("error billingReportByCompetition: %w", err)
 		}
 		tbrs = append(tbrs, *report)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("error committing transaction: %w", err)
 	}
 
 	res := SuccessResult{
@@ -1253,29 +1266,13 @@ func playerHandler(c echo.Context) error {
 		}
 		return fmt.Errorf("error retrievePlayer: %w", err)
 	}
-	cs := []CompetitionRow{}
-	if err := tenantDB.SelectContext(
-		ctx,
-		&cs,
-		"SELECT * FROM competition WHERE tenant_id = ? ORDER BY created_at ASC",
-		v.tenantID,
-	); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("error Select competition: %w", err)
-	}
 
-	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(v.tenantID)
+	// トランザクションを使用して一貫性を担保
+	tx, err := tenantDB.Beginx()
 	if err != nil {
-		return fmt.Errorf("error flockByTenantID: %w", err)
+		return fmt.Errorf("error starting transaction: %w", err)
 	}
-	defer fl.Unlock()
-
-	// N+1問題を解消するために、JOINを使用して一括取得
-	type PlayerScoreWithCompetition struct {
-		CompetitionID    string `db:"competition_id"`
-		CompetitionTitle string `db:"competition_title"`
-		Score            int64  `db:"score"`
-	}
+	defer tx.Rollback()
 
 	// JOINを使用して、プレイヤースコアと大会情報を一括取得
 	query := `
@@ -1300,8 +1297,14 @@ func playerHandler(c echo.Context) error {
 			c.created_at ASC
 	`
 
+	type PlayerScoreWithCompetition struct {
+		CompetitionID    string `db:"competition_id"`
+		CompetitionTitle string `db:"competition_title"`
+		Score            int64  `db:"score"`
+	}
+
 	playerScores := []PlayerScoreWithCompetition{}
-	if err := tenantDB.SelectContext(
+	if err := tx.SelectContext(
 		ctx,
 		&playerScores,
 		query,
@@ -1309,6 +1312,10 @@ func playerHandler(c echo.Context) error {
 		v.tenantID,
 	); err != nil {
 		return fmt.Errorf("error Select player_score with competition: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("error committing transaction: %w", err)
 	}
 
 	// 結果を構築
@@ -1409,15 +1416,13 @@ func competitionRankingHandler(c echo.Context) error {
 		}
 	}
 
-	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(v.tenantID)
+	// トランザクションを使用して一貫性を担保
+	tx, err := tenantDB.Beginx()
 	if err != nil {
-		return fmt.Errorf("error flockByTenantID: %w", err)
+		return fmt.Errorf("error starting transaction: %w", err)
 	}
-	defer fl.Unlock()
+	defer tx.Rollback()
 
-	// N+1問題を解消するために、プレイヤー情報を一括取得
-	// SQLでソートも行う
 	type PlayerScoreWithRank struct {
 		PlayerID    string `db:"player_id"`
 		Score       int64  `db:"score"`
@@ -1458,13 +1463,17 @@ func competitionRankingHandler(c echo.Context) error {
 	`
 
 	rankedScores := []PlayerScoreWithRank{}
-	if err := tenantDB.SelectContext(
+	if err := tx.SelectContext(
 		ctx,
 		&rankedScores,
 		query,
 		tenant.ID, competitionID, tenant.ID, competitionID, rankAfter,
 	); err != nil {
 		return fmt.Errorf("error Select player_score with rank: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("error committing transaction: %w", err)
 	}
 
 	// ランキング結果を構築
