@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1367,56 +1366,67 @@ func competitionRankingHandler(c echo.Context) error {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
 	defer fl.Close()
-	pss := []PlayerScoreRow{}
+
+	// N+1問題を解消するために、プレイヤー情報を一括取得
+	// SQLでソートも行う
+	type PlayerScoreWithRank struct {
+		PlayerID    string `db:"player_id"`
+		Score       int64  `db:"score"`
+		RowNum      int64  `db:"row_num"`
+		DisplayName string `db:"display_name"`
+		RankNum     int64  `db:"rank_num"`
+	}
+
+	// 最新のスコアを取得し、スコア降順、row_num昇順でソート
+	query := `
+		WITH ranked_scores AS (
+			SELECT
+				ps.player_id,
+				ps.score,
+				ps.row_num,
+				p.display_name,
+				ROW_NUMBER() OVER (ORDER BY ps.score DESC, ps.row_num ASC) as rank_num
+			FROM (
+				SELECT
+					player_id,
+					MAX(row_num) as max_row_num
+				FROM
+					player_score
+				WHERE
+					tenant_id = ? AND competition_id = ?
+				GROUP BY
+					player_id
+			) latest
+			JOIN player_score ps ON ps.player_id = latest.player_id AND ps.row_num = latest.max_row_num
+			JOIN player p ON p.id = ps.player_id
+			WHERE
+				ps.tenant_id = ? AND ps.competition_id = ?
+		)
+		SELECT * FROM ranked_scores
+		WHERE rank_num > ?
+		ORDER BY rank_num
+		LIMIT 100
+	`
+
+	rankedScores := []PlayerScoreWithRank{}
 	if err := tenantDB.SelectContext(
 		ctx,
-		&pss,
-		"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? ORDER BY row_num DESC",
-		tenant.ID,
-		competitionID,
+		&rankedScores,
+		query,
+		tenant.ID, competitionID, tenant.ID, competitionID, rankAfter,
 	); err != nil {
-		return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%s, %w", tenant.ID, competitionID, err)
+		return fmt.Errorf("error Select player_score with rank: %w", err)
 	}
-	ranks := make([]CompetitionRank, 0, len(pss))
-	scoredPlayerSet := make(map[string]struct{}, len(pss))
-	for _, ps := range pss {
-		// player_scoreが同一player_id内ではrow_numの降順でソートされているので
-		// 現れたのが2回目以降のplayer_idはより大きいrow_numでスコアが出ているとみなせる
-		if _, ok := scoredPlayerSet[ps.PlayerID]; ok {
-			continue
-		}
-		scoredPlayerSet[ps.PlayerID] = struct{}{}
-		p, err := retrievePlayer(ctx, tenantDB, ps.PlayerID)
-		if err != nil {
-			return fmt.Errorf("error retrievePlayer: %w", err)
-		}
-		ranks = append(ranks, CompetitionRank{
-			Score:             ps.Score,
-			PlayerID:          p.ID,
-			PlayerDisplayName: p.DisplayName,
-			RowNum:            ps.RowNum,
-		})
-	}
-	sort.Slice(ranks, func(i, j int) bool {
-		if ranks[i].Score == ranks[j].Score {
-			return ranks[i].RowNum < ranks[j].RowNum
-		}
-		return ranks[i].Score > ranks[j].Score
-	})
-	pagedRanks := make([]CompetitionRank, 0, 100)
-	for i, rank := range ranks {
-		if int64(i) < rankAfter {
-			continue
-		}
+
+	// ランキング結果を構築
+	pagedRanks := make([]CompetitionRank, 0, len(rankedScores))
+	for _, rs := range rankedScores {
 		pagedRanks = append(pagedRanks, CompetitionRank{
-			Rank:              int64(i + 1),
-			Score:             rank.Score,
-			PlayerID:          rank.PlayerID,
-			PlayerDisplayName: rank.PlayerDisplayName,
+			Rank:              rs.RankNum,
+			Score:             rs.Score,
+			PlayerID:          rs.PlayerID,
+			PlayerDisplayName: rs.DisplayName,
 		})
-		if len(pagedRanks) >= 100 {
-			break
-		}
 	}
 
 	res := SuccessResult{
