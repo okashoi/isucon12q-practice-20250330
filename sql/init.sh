@@ -16,13 +16,6 @@ mysql -u"$ISUCON_DB_USER" \
 		--port "$ISUCON_DB_PORT" \
 		"$ISUCON_DB_NAME" < init.sql
 
-# インデックスを追加
-mysql -u"$ISUCON_DB_USER" \
-		-p"$ISUCON_DB_PASSWORD" \
-		--host "$ISUCON_DB_HOST" \
-		--port "$ISUCON_DB_PORT" \
-		"$ISUCON_DB_NAME" < admin/20_index.sql
-
 # SQLiteのデータベースを初期化
 rm -f ../tenant_db/*.db
 cp -r ../../initial_data/*.db ../tenant_db/

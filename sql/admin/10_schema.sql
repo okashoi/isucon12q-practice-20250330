@@ -32,3 +32,6 @@ CREATE TABLE `visit_history` (
 
 ALTER TABLE visit_history ADD INDEx (tenant_id, competition_id, player_id, created_at);
 ALTER TABLE visit_history ADD INDEX (created_at);
+
+-- tenantテーブルにdisplay_nameカラムのインデックスを追加
+ALTER TABLE `tenant` ADD INDEX `idx_tenant_display_name` (`display_name`);
