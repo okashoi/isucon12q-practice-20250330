@@ -430,10 +430,7 @@ type PlayerScoreRow struct {
 // 排他ロックする
 // トランザクションを開始し、そのトランザクションとデータベース接続を返す
 func beginTransactionByTenantID(ctx context.Context, tenantID int64) (*sqlx.Tx, *sqlx.DB, error) {
-	db, err := connectToTenantDB(tenantID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error connectToTenantDB: %w", err)
-	}
+	db := tenantDB
 
 	tx, err := db.BeginTxx(ctx, &sql.TxOptions{
 		Isolation: sql.LevelSerializable,
