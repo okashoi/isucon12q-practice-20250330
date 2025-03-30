@@ -88,23 +88,23 @@ duration_index = 10
 # For overview of regexp syntax: https://golang.org/pkg/regexp/syntax/
 #
 [[bundle]]
-regexp = 'GET /api/player/competition/[a-z0-9]+/ranking'
+regexp = 'GET /api/player/competition/[a-z0-9\-]+/ranking'
 name = 'GET /api/player/competition/<id>/ranking'
 
 [[bundle]]
-regexp = 'GET /api/player/player/[a-z0-9]+'
+regexp = 'GET /api/player/player/[a-z0-9\-]+'
 name = 'GET /api/player/player/<id>'
 
 [[bundle]]
-regexp = 'POST /api/organizer/competition/[a-z0-9]+/score'
+regexp = 'POST /api/organizer/competition/[a-z0-9\-]+/score'
 name = 'POST /api/organizer/competition/<id>/score'
 
 [[bundle]]
-regexp = 'POST /api/organizer/competition/[a-z0-9]+/finish'
+regexp = 'POST /api/organizer/competition/[a-z0-9\-]+/finish'
 name = 'POST /api/organizer/competition/<id>/finish'
 
 [[bundle]]
-regexp = 'POST /api/organizer/player/[a-z0-9]+/disqualified'
+regexp = 'POST /api/organizer/player/[a-z0-9\-]+/disqualified'
 name = 'POST /api/organizer/player/<id>/disqualified'
 
 ################################################################################
