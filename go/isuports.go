@@ -453,7 +453,7 @@ func beginTransactionByTenantID(ctx context.Context, tenantID int64) (*sqlx.Tx, 
 	}
 
 	tx, err := db.BeginTxx(ctx, &sql.TxOptions{
-		Isolation: sql.LevelReadCommitted, // より緩やかな分離レベル
+		Isolation: sql.LevelSerializable,
 	})
 	if err != nil {
 		db.Close()
