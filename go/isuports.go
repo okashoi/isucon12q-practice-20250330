@@ -137,7 +137,9 @@ func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 func Run() {
 	http.DefaultServeMux.Handle("/debug/fgprof", fgprof.Handler())
 	go func() {
-		fmt.Sprintf(http.ListenAndServe(":6060", nil))
+    	if err := http.ListenAndServe(":6060", nil); err != nil {
+        	log.Fatalf("Server error: %v", err)
+    	}
 	}()
 	e := echo.New()
 	e.Debug = true
