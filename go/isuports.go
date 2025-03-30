@@ -6,7 +6,6 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
-	"github.com/felixge/fgprof"
 	"io"
 	"net/http"
 	_ "net/http/pprof"
@@ -18,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/felixge/fgprof"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/gofrs/flock"
@@ -136,9 +137,9 @@ func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 func Run() {
 	http.DefaultServeMux.Handle("/debug/fgprof", fgprof.Handler())
 	go func() {
-    	if err := http.ListenAndServe(":6060", nil); err != nil {
-        	log.Fatalf("Server error: %v", err)
-    	}
+		if err := http.ListenAndServe(":6060", nil); err != nil {
+			log.Fatalf("Server error: %v", err)
+		}
 	}()
 	e := echo.New()
 	e.Debug = true
@@ -1246,35 +1247,53 @@ func playerHandler(c echo.Context) error {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
 	defer fl.Close()
-	pss := make([]PlayerScoreRow, 0, len(cs))
-	for _, c := range cs {
-		ps := PlayerScoreRow{}
-		if err := tenantDB.GetContext(
-			ctx,
-			&ps,
-			// 最後にCSVに登場したスコアを採用する = row_numが一番大きいもの
-			"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? AND player_id = ? ORDER BY row_num DESC LIMIT 1",
-			v.tenantID,
-			c.ID,
-			p.ID,
-		); err != nil {
-			// 行がない = スコアが記録されてない
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%s, playerID=%s, %w", v.tenantID, c.ID, p.ID, err)
-		}
-		pss = append(pss, ps)
+
+	// N+1問題を解消するために、JOINを使用して一括取得
+	type PlayerScoreWithCompetition struct {
+		CompetitionID    string `db:"competition_id"`
+		CompetitionTitle string `db:"competition_title"`
+		Score            int64  `db:"score"`
 	}
 
-	psds := make([]PlayerScoreDetail, 0, len(pss))
-	for _, ps := range pss {
-		comp, err := retrieveCompetition(ctx, tenantDB, ps.CompetitionID)
-		if err != nil {
-			return fmt.Errorf("error retrieveCompetition: %w", err)
-		}
+	// JOINを使用して、プレイヤースコアと大会情報を一括取得
+	query := `
+		SELECT
+			c.id AS competition_id,
+			c.title AS competition_title,
+			ps.score
+		FROM
+			competition c
+		JOIN
+			player_score ps ON c.id = ps.competition_id
+		WHERE
+			ps.player_id = ?
+			AND ps.tenant_id = ?
+			AND ps.row_num = (
+				SELECT MAX(row_num)
+				FROM player_score
+				WHERE player_id = ps.player_id
+				AND competition_id = ps.competition_id
+			)
+		ORDER BY
+			c.created_at ASC
+	`
+
+	playerScores := []PlayerScoreWithCompetition{}
+	if err := tenantDB.SelectContext(
+		ctx,
+		&playerScores,
+		query,
+		p.ID,
+		v.tenantID,
+	); err != nil {
+		return fmt.Errorf("error Select player_score with competition: %w", err)
+	}
+
+	// 結果を構築
+	psds := make([]PlayerScoreDetail, 0, len(playerScores))
+	for _, ps := range playerScores {
 		psds = append(psds, PlayerScoreDetail{
-			CompetitionTitle: comp.Title,
+			CompetitionTitle: ps.CompetitionTitle,
 			Score:            ps.Score,
 		})
 	}
