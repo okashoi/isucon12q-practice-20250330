@@ -447,7 +447,7 @@ func lockFilePath(id int64) string {
 }
 
 // 排他ロックする
-func flockByTenantID(tenantID int64) (io.Closer, error) {
+func flockByTenantID(tenantID int64) (*flock.Flock, error) {
 	p := lockFilePath(tenantID)
 
 	fl := flock.New(p)
@@ -588,7 +588,7 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 	if err != nil {
 		return nil, fmt.Errorf("error flockByTenantID: %w", err)
 	}
-	defer fl.Close()
+	defer fl.Unlock()
 
 	// スコアを登録した参加者のIDを取得する
 	scoredPlayerIDs := []string{}
@@ -1067,7 +1067,7 @@ func competitionScoreHandler(c echo.Context) error {
 	if err != nil {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
-	defer fl.Close()
+	defer fl.Unlock()
 	var rowNum int64
 	playerScoreRows := []PlayerScoreRow{}
 	for {
@@ -1268,7 +1268,7 @@ func playerHandler(c echo.Context) error {
 	if err != nil {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
-	defer fl.Close()
+	defer fl.Unlock()
 
 	// N+1問題を解消するために、JOINを使用して一括取得
 	type PlayerScoreWithCompetition struct {
@@ -1414,7 +1414,7 @@ func competitionRankingHandler(c echo.Context) error {
 	if err != nil {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
-	defer fl.Close()
+	defer fl.Unlock()
 
 	// N+1問題を解消するために、プレイヤー情報を一括取得
 	// SQLでソートも行う
