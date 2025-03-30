@@ -1330,6 +1330,12 @@ func playerHandler(c echo.Context) error {
 	return c.JSON(http.StatusOK, res)
 }
 
+type PlayerScoreWithCompetition struct {
+	CompetitionID    string `db:"competition_id"`
+	CompetitionTitle string `db:"competition_title"`
+	Score            int64  `db:"score"`
+}
+
 type CompetitionRank struct {
 	Rank              int64  `json:"rank"`
 	Score             int64  `json:"score"`
@@ -1397,10 +1403,9 @@ func competitionRankingHandler(c echo.Context) error {
 		)
 	}
 
-	var rankAfter int64
 	rankAfterStr := c.QueryParam("rank_after")
 	if rankAfterStr != "" {
-		if rankAfter, err = strconv.ParseInt(rankAfterStr, 10, 64); err != nil {
+		if _, err = strconv.ParseInt(rankAfterStr, 10, 64); err != nil {
 			return fmt.Errorf("error strconv.ParseUint: rankAfterStr=%s, %w", rankAfterStr, err)
 		}
 	}
@@ -1468,10 +1473,9 @@ func competitionRankingHandler(c echo.Context) error {
 	ranks := make([]CompetitionRank, 0, len(playerRows))
 	for _, p := range playerRows {
 		ranks = append(ranks, CompetitionRank{
-			Score:                playerScores[p.ID],
-			PlayerID:             p.ID,
-			PlayerName:           p.DisplayName,
-			PlayerIsDisqualified: p.IsDisqualified,
+			Score:             playerScores[p.ID],
+			PlayerID:          p.ID,
+			PlayerDisplayName: p.DisplayName,
 		})
 	}
 	sort.Slice(ranks, func(i, j int) bool {
