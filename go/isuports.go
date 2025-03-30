@@ -539,7 +539,7 @@ type VisitHistoryRow struct {
 	TenantID      int64  `db:"tenant_id"`
 	CompetitionID string `db:"competition_id"`
 	CreatedAt     int64  `db:"created_at"`
-	//UpdatedAt     int64  `db:"updated_at"`
+	UpdatedAt     int64  `db:"updated_at"`
 }
 
 type VisitHistorySummaryRow struct {
@@ -559,7 +559,7 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 	if err := adminDB.SelectContext(
 		ctx,
 		&vhs,
-		"SELECT player_id, created_at AS min_created_at FROM visit_history WHERE tenant_id = ? AND competition_id = ? LIMIT 1",
+		"SELECT player_id, MIN(created_at) AS min_created_at FROM visit_history WHERE tenant_id = ? AND competition_id = ? GROUP BY player_id",
 		tenantID,
 		comp.ID,
 	); err != nil && err != sql.ErrNoRows {
@@ -1370,8 +1370,8 @@ func competitionRankingHandler(c echo.Context) error {
 
 	if _, err := adminDB.ExecContext(
 		ctx,
-		"INSERT IGNORE INTO visit_history (player_id, tenant_id, competition_id, created_at) VALUES (?, ?, ?, ?)",
-		v.playerID, tenant.ID, competitionID, now,
+		"INSERT INTO visit_history (player_id, tenant_id, competition_id, created_at, updated_at) VALUES (?, ?, ?, ?,?)",
+		v.playerID, tenant.ID, competitionID, now, now,
 	); err != nil {
 		return fmt.Errorf(
 			"error Insert visit_history: playerID=%s, tenantID=%d, competitionID=%s, createdAt=%d, updatedAt=%d, %w",
