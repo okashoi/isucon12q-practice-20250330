@@ -81,12 +81,7 @@ func tenantDBPath(id int64) string {
 // テナントDBに接続する
 func connectToTenantDB(id int64) (*sqlx.DB, error) {
 	p := tenantDBPath(id)
-	// 以下のオプションを追加
-	// _busy_timeout: ロックが解放されるまで待機する時間（ミリ秒）
-	// _journal_mode=WAL: Write-Ahead Loggingモードを使用して同時実行性を向上
-	// cache=shared: 接続間でページキャッシュを共有
-	dsn := fmt.Sprintf("file:%s?mode=rw&_busy_timeout=5000&_journal_mode=WAL&cache=shared", p)
-	db, err := sqlx.Open(sqliteDriverName, dsn)
+	db, err := sqlx.Open(sqliteDriverName, fmt.Sprintf("file:%s?mode=rw", p))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open tenant DB: %w", err)
 	}
