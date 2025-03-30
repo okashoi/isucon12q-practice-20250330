@@ -439,16 +439,6 @@ type PlayerScoreRow struct {
 	UpdatedAt     int64  `db:"updated_at"`
 }
 
-// 排他ロックのためのファイル名を生成する関数を削除
-func lockFilePath(id int64) string {
-	return ""
-}
-
-// 排他ロックする関数を削除
-func flockByTenantID(tenantID int64) (io.Closer, error) {
-	return nil, nil
-}
-
 type TenantsAddHandlerResult struct {
 	Tenant TenantWithBilling `json:"tenant"`
 }
