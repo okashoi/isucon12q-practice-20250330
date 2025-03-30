@@ -1270,37 +1270,54 @@ func playerHandler(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
-	query := `
-		SELECT
-			c.id AS competition_id,
-			c.title AS competition_title,
-			ps.score
-		FROM
-			competition c
-		JOIN
-			player_score ps ON c.id = ps.competition_id
-		WHERE
-			ps.player_id = ?
-			AND ps.tenant_id = ?
-			AND ps.row_num = (
-				SELECT MAX(row_num)
-				FROM player_score
-				WHERE player_id = ps.player_id
-				AND competition_id = ps.competition_id
-			)
-		ORDER BY
-			c.created_at ASC
-	`
+	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
+	// SQLiteではFOR UPDATEがサポートされていないため、単純なSELECTで代用
+	if _, err := tx.ExecContext(
+		ctx,
+		"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ?",
+		v.tenantID,
+		playerID,
+	); err != nil {
+		return fmt.Errorf("error Select player_score: %w", err)
+	}
 
-	playerScores := []PlayerScoreWithCompetition{}
+	// スコアを取得
+	scoredPlayerIDs := []string{}
+	playerScores := make(map[string]int64)
+	playerScoreRows := []PlayerScoreRow{}
 	if err := tx.SelectContext(
 		ctx,
-		&playerScores,
-		query,
-		p.ID,
+		&playerScoreRows,
+		"SELECT * FROM player_score WHERE tenant_id = ? AND player_id = ? ORDER BY row_num ASC",
 		v.tenantID,
+		playerID,
 	); err != nil {
-		return fmt.Errorf("error Select player_score with competition: %w", err)
+		return fmt.Errorf("error Select player_score: %w", err)
+	}
+	for _, ps := range playerScoreRows {
+		scoredPlayerIDs = append(scoredPlayerIDs, ps.PlayerID)
+		playerScores[ps.PlayerID] = ps.Score
+	}
+
+	// プレイヤー情報を取得
+	playerRows := []PlayerRow{}
+	if len(scoredPlayerIDs) > 0 {
+		query, params, err := sqlx.In(
+			"SELECT * FROM player WHERE tenant_id = ? AND id IN (?)",
+			v.tenantID,
+			scoredPlayerIDs,
+		)
+		if err != nil {
+			return fmt.Errorf("error sqlx.In: %w", err)
+		}
+		if err := tx.SelectContext(
+			ctx,
+			&playerRows,
+			query,
+			params...,
+		); err != nil {
+			return fmt.Errorf("error Select player: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1308,11 +1325,11 @@ func playerHandler(c echo.Context) error {
 	}
 
 	// 結果を構築
-	psds := make([]PlayerScoreDetail, 0, len(playerScores))
-	for _, ps := range playerScores {
+	psds := make([]PlayerScoreDetail, 0, len(playerRows))
+	for _, ps := range playerRows {
 		psds = append(psds, PlayerScoreDetail{
-			CompetitionTitle: ps.CompetitionTitle,
-			Score:            ps.Score,
+			CompetitionTitle: ps.Title,
+			Score:            playerScores[ps.ID],
 		})
 	}
 
@@ -1417,9 +1434,10 @@ func competitionRankingHandler(c echo.Context) error {
 	defer tx.Rollback()
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
+	// SQLiteではFOR UPDATEがサポートされていないため、単純なSELECTで代用
 	if _, err := tx.ExecContext(
 		ctx,
-		"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? FOR UPDATE",
+		"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ?",
 		v.tenantID,
 		competitionID,
 	); err != nil {
