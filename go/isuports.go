@@ -6,7 +6,6 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
-	"github.com/felixge/fgprof"
 	"io"
 	"net/http"
 	_ "net/http/pprof"
@@ -18,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/felixge/fgprof"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/gofrs/flock"
@@ -95,6 +96,11 @@ func createTenantDB(id int64) error {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to exec sqlite3 %s < %s, out=%s: %w", p, tenantDBSchemaFilePath, string(out), err)
 	}
+	cmd = exec.Command("sh", "-c", fmt.Sprintf("sqlite3 %s < %s", p, "../sql/tenant/11_index.sql"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to exec sqlite3 %s < %s, out=%s: %w", p, "../sql/tenant/11_index.sql", string(out), err)
+	}
+
 	return nil
 }
 
@@ -136,9 +142,9 @@ func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 func Run() {
 	http.DefaultServeMux.Handle("/debug/fgprof", fgprof.Handler())
 	go func() {
-    	if err := http.ListenAndServe(":6060", nil); err != nil {
-        	log.Fatalf("Server error: %v", err)
-    	}
+		if err := http.ListenAndServe(":6060", nil); err != nil {
+			log.Fatalf("Server error: %v", err)
+		}
 	}()
 	e := echo.New()
 	e.Debug = true
