@@ -21,7 +21,6 @@ import (
 	"github.com/felixge/fgprof"
 
 	"github.com/go-sql-driver/mysql"
-	"github.com/gofrs/flock"
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -440,97 +439,164 @@ type PlayerScoreRow struct {
 	UpdatedAt     int64  `db:"updated_at"`
 }
 
-// 排他ロックのためのファイル名を生成する
-func lockFilePath(id int64) string {
-	tenantDBDir := getEnv("ISUCON_TENANT_DB_DIR", "../tenant_db")
-	return filepath.Join(tenantDBDir, fmt.Sprintf("%d.lock", id))
-}
-
-// 排他ロックする
-func flockByTenantID(tenantID int64) (io.Closer, error) {
-	p := lockFilePath(tenantID)
-
-	fl := flock.New(p)
-	if err := fl.Lock(); err != nil {
-		return nil, fmt.Errorf("error flock.Lock: path=%s, %w", p, err)
-	}
-	return fl, nil
-}
-
-type TenantsAddHandlerResult struct {
-	Tenant TenantWithBilling `json:"tenant"`
-}
-
-// SasS管理者用API
-// テナントを追加する
-// POST /api/admin/tenants/add
-func tenantsAddHandler(c echo.Context) error {
+// テナント管理者向けAPI
+// POST /api/organizer/competition/:competition_id/score
+// 大会のスコアをCSVでアップロードする
+func competitionScoreHandler(c echo.Context) error {
+	ctx := context.Background()
 	v, err := parseViewer(c)
 	if err != nil {
 		return fmt.Errorf("error parseViewer: %w", err)
 	}
-	if v.tenantName != "admin" {
-		// admin: SaaS管理者用の特別なテナント名
-		return echo.NewHTTPError(
-			http.StatusNotFound,
-			fmt.Sprintf("%s has not this API", v.tenantName),
-		)
-	}
-	if v.role != RoleAdmin {
-		return echo.NewHTTPError(http.StatusForbidden, "admin role required")
+	if v.role != RoleOrganizer {
+		return echo.NewHTTPError(http.StatusForbidden, "role organizer required")
 	}
 
-	displayName := c.FormValue("display_name")
-	name := c.FormValue("name")
-	if err := validateTenantName(name); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	}
-
-	ctx := context.Background()
-	now := time.Now().Unix()
-	insertRes, err := adminDB.ExecContext(
-		ctx,
-		"INSERT INTO tenant (name, display_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
-		name, displayName, now, now,
-	)
+	tenantDB, err := connectToTenantDB(v.tenantID)
 	if err != nil {
-		if merr, ok := err.(*mysql.MySQLError); ok && merr.Number == 1062 { // duplicate entry
-			return echo.NewHTTPError(http.StatusBadRequest, "duplicate tenant")
+		return err
+	}
+	defer tenantDB.Close()
+
+	competitionID := c.Param("competition_id")
+	if competitionID == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "competition_id required")
+	}
+	comp, err := retrieveCompetition(ctx, tenantDB, competitionID)
+	if err != nil {
+		// 存在しない大会
+		if errors.Is(err, sql.ErrNoRows) {
+			return echo.NewHTTPError(http.StatusNotFound, "competition not found")
 		}
-		return fmt.Errorf(
-			"error Insert tenant: name=%s, displayName=%s, createdAt=%d, updatedAt=%d, %w",
-			name, displayName, now, now, err,
-		)
+		return fmt.Errorf("error retrieveCompetition: %w", err)
+	}
+	if comp.FinishedAt.Valid {
+		res := FailureResult{
+			Status:  false,
+			Message: "competition is finished",
+		}
+		return c.JSON(http.StatusBadRequest, res)
 	}
 
-	id, err := insertRes.LastInsertId()
+	fh, err := c.FormFile("scores")
 	if err != nil {
-		return fmt.Errorf("error get LastInsertId: %w", err)
+		return fmt.Errorf("error c.FormFile(scores): %w", err)
 	}
-	// NOTE: 先にadminDBに書き込まれることでこのAPIの処理中に
-	//       /api/admin/tenants/billingにアクセスされるとエラーになりそう
-	//       ロックなどで対処したほうが良さそう
-	if err := createTenantDB(id); err != nil {
-		return fmt.Errorf("error createTenantDB: id=%d name=%s %w", id, name, err)
+	f, err := fh.Open()
+	if err != nil {
+		return fmt.Errorf("error fh.Open FormFile(scores): %w", err)
+	}
+	defer f.Close()
+
+	r := csv.NewReader(f)
+	headers, err := r.Read()
+	if err != nil {
+		return fmt.Errorf("error r.Read at header: %w", err)
+	}
+	if !reflect.DeepEqual(headers, []string{"player_id", "score"}) {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid CSV headers")
 	}
 
-	res := TenantsAddHandlerResult{
-		Tenant: TenantWithBilling{
-			ID:          strconv.FormatInt(id, 10),
-			Name:        name,
-			DisplayName: displayName,
-			BillingYen:  0,
-		},
+	// トランザクション内でスコアの更新を行う
+	tx, err := tenantDB.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("error BeginTxx: %w", err)
 	}
-	return c.JSON(http.StatusOK, SuccessResult{Status: true, Data: res})
-}
+	defer tx.Rollback()
 
-// テナント名が規則に沿っているかチェックする
-func validateTenantName(name string) error {
-	if tenantNameRegexp.MatchString(name) {
-		return nil
+	var rowNum int64
+	playerScoreRows := []PlayerScoreRow{}
+	for {
+		rowNum++
+		row, err := r.Read()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("error r.Read at rows: %w", err)
+		}
+		if len(row) != 2 {
+			return fmt.Errorf("row must have two columns: %#v", row)
+		}
+		playerID, scoreStr := row[0], row[1]
+		if _, err := retrievePlayer(ctx, tenantDB, playerID); err != nil {
+			// 存在しない参加者が含まれている
+			if errors.Is(err, sql.ErrNoRows) {
+				return echo.NewHTTPError(
+					http.StatusBadRequest,
+					fmt.Sprintf("player not found: %s", playerID),
+				)
+			}
+			return fmt.Errorf("error retrievePlayer: %w", err)
+		}
+		var score int64
+		if score, err = strconv.ParseInt(scoreStr, 10, 64); err != nil {
+			return echo.NewHTTPError(
+				http.StatusBadRequest,
+				fmt.Sprintf("error strconv.ParseUint: scoreStr=%s, %s", scoreStr, err),
+			)
+		}
+		id, err := dispenseID(ctx)
+		if err != nil {
+			return fmt.Errorf("error dispenseID: %w", err)
+		}
+		now := time.Now().Unix()
+		playerScoreRows = append(playerScoreRows, PlayerScoreRow{
+			ID:            id,
+			TenantID:      v.tenantID,
+			PlayerID:      playerID,
+			CompetitionID: competitionID,
+			Score:         score,
+			RowNum:        rowNum,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		})
 	}
-	return fmt.Errorf("invalid tenant name: %s", name)
+
+	// 既存のスコアを削除
+	if _, err := tx.ExecContext(
+		ctx,
+		"DELETE FROM player_score WHERE tenant_id = ? AND competition_id = ?",
+		v.tenantID,
+		competitionID,
+	); err != nil {
+		return fmt.Errorf("error Delete player_score: tenantID=%d, competitionID=%s, %w", v.tenantID, competitionID, err)
+	}
+
+	// バルクインサートの実装
+	if len(playerScoreRows) > 0 {
+		valueStrings := make([]string, 0, len(playerScoreRows))
+		valueArgs := make([]interface{}, 0, len(playerScoreRows)*8)
+
+		for _, ps := range playerScoreRows {
+			valueStrings = append(valueStrings, "(?, ?, ?, ?, ?, ?, ?, ?)")
+			valueArgs = append(valueArgs,
+				ps.ID,
+				ps.TenantID,
+				ps.PlayerID,
+				ps.CompetitionID,
+				ps.Score,
+				ps.RowNum,
+				ps.CreatedAt,
+				ps.UpdatedAt)
+		}
+
+		stmt := fmt.Sprintf("INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) VALUES %s",
+			strings.Join(valueStrings, ","))
+
+		if _, err := tx.ExecContext(ctx, stmt, valueArgs...); err != nil {
+			return fmt.Errorf("error bulk insert player_score: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("error Commit: %w", err)
+	}
+
+	return c.JSON(http.StatusOK, SuccessResult{
+		Status: true,
+		Data:   ScoreHandlerResult{Rows: int64(len(playerScoreRows))},
+	})
 }
 
 type BillingReport struct {
@@ -584,15 +650,15 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(tenantID)
+	tx, err := tenantDB.BeginTxx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("error flockByTenantID: %w", err)
+		return nil, fmt.Errorf("error BeginTxx: %w", err)
 	}
-	defer fl.Close()
+	defer tx.Rollback()
 
 	// スコアを登録した参加者のIDを取得する
 	scoredPlayerIDs := []string{}
-	if err := tenantDB.SelectContext(
+	if err := tx.SelectContext(
 		ctx,
 		&scoredPlayerIDs,
 		"SELECT DISTINCT(player_id) FROM player_score WHERE tenant_id = ? AND competition_id = ?",
@@ -617,6 +683,11 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 			}
 		}
 	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("error Commit: %w", err)
+	}
+
 	return &BillingReport{
 		CompetitionID:     comp.ID,
 		CompetitionTitle:  comp.Title,
@@ -1004,160 +1075,6 @@ type ScoreHandlerResult struct {
 	Rows int64 `json:"rows"`
 }
 
-// テナント管理者向けAPI
-// POST /api/organizer/competition/:competition_id/score
-// 大会のスコアをCSVでアップロードする
-func competitionScoreHandler(c echo.Context) error {
-	ctx := context.Background()
-	v, err := parseViewer(c)
-	if err != nil {
-		return fmt.Errorf("error parseViewer: %w", err)
-	}
-	if v.role != RoleOrganizer {
-		return echo.NewHTTPError(http.StatusForbidden, "role organizer required")
-	}
-
-	tenantDB, err := connectToTenantDB(v.tenantID)
-	if err != nil {
-		return err
-	}
-	defer tenantDB.Close()
-
-	competitionID := c.Param("competition_id")
-	if competitionID == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "competition_id required")
-	}
-	comp, err := retrieveCompetition(ctx, tenantDB, competitionID)
-	if err != nil {
-		// 存在しない大会
-		if errors.Is(err, sql.ErrNoRows) {
-			return echo.NewHTTPError(http.StatusNotFound, "competition not found")
-		}
-		return fmt.Errorf("error retrieveCompetition: %w", err)
-	}
-	if comp.FinishedAt.Valid {
-		res := FailureResult{
-			Status:  false,
-			Message: "competition is finished",
-		}
-		return c.JSON(http.StatusBadRequest, res)
-	}
-
-	fh, err := c.FormFile("scores")
-	if err != nil {
-		return fmt.Errorf("error c.FormFile(scores): %w", err)
-	}
-	f, err := fh.Open()
-	if err != nil {
-		return fmt.Errorf("error fh.Open FormFile(scores): %w", err)
-	}
-	defer f.Close()
-
-	r := csv.NewReader(f)
-	headers, err := r.Read()
-	if err != nil {
-		return fmt.Errorf("error r.Read at header: %w", err)
-	}
-	if !reflect.DeepEqual(headers, []string{"player_id", "score"}) {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid CSV headers")
-	}
-
-	// / DELETEしたタイミングで参照が来ると空っぽのランキングになるのでロックする
-	fl, err := flockByTenantID(v.tenantID)
-	if err != nil {
-		return fmt.Errorf("error flockByTenantID: %w", err)
-	}
-	defer fl.Close()
-	var rowNum int64
-	playerScoreRows := []PlayerScoreRow{}
-	for {
-		rowNum++
-		row, err := r.Read()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return fmt.Errorf("error r.Read at rows: %w", err)
-		}
-		if len(row) != 2 {
-			return fmt.Errorf("row must have two columns: %#v", row)
-		}
-		playerID, scoreStr := row[0], row[1]
-		if _, err := retrievePlayer(ctx, tenantDB, playerID); err != nil {
-			// 存在しない参加者が含まれている
-			if errors.Is(err, sql.ErrNoRows) {
-				return echo.NewHTTPError(
-					http.StatusBadRequest,
-					fmt.Sprintf("player not found: %s", playerID),
-				)
-			}
-			return fmt.Errorf("error retrievePlayer: %w", err)
-		}
-		var score int64
-		if score, err = strconv.ParseInt(scoreStr, 10, 64); err != nil {
-			return echo.NewHTTPError(
-				http.StatusBadRequest,
-				fmt.Sprintf("error strconv.ParseUint: scoreStr=%s, %s", scoreStr, err),
-			)
-		}
-		id, err := dispenseID(ctx)
-		if err != nil {
-			return fmt.Errorf("error dispenseID: %w", err)
-		}
-		now := time.Now().Unix()
-		playerScoreRows = append(playerScoreRows, PlayerScoreRow{
-			ID:            id,
-			TenantID:      v.tenantID,
-			PlayerID:      playerID,
-			CompetitionID: competitionID,
-			Score:         score,
-			RowNum:        rowNum,
-			CreatedAt:     now,
-			UpdatedAt:     now,
-		})
-	}
-
-	if _, err := tenantDB.ExecContext(
-		ctx,
-		"DELETE FROM player_score WHERE tenant_id = ? AND competition_id = ?",
-		v.tenantID,
-		competitionID,
-	); err != nil {
-		return fmt.Errorf("error Delete player_score: tenantID=%d, competitionID=%s, %w", v.tenantID, competitionID, err)
-	}
-
-	// バルクインサートの実装
-	if len(playerScoreRows) > 0 {
-		valueStrings := make([]string, 0, len(playerScoreRows))
-		valueArgs := make([]interface{}, 0, len(playerScoreRows)*8)
-
-		for _, ps := range playerScoreRows {
-			valueStrings = append(valueStrings, "(?, ?, ?, ?, ?, ?, ?, ?)")
-			valueArgs = append(valueArgs,
-				ps.ID,
-				ps.TenantID,
-				ps.PlayerID,
-				ps.CompetitionID,
-				ps.Score,
-				ps.RowNum,
-				ps.CreatedAt,
-				ps.UpdatedAt)
-		}
-
-		stmt := fmt.Sprintf("INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) VALUES %s",
-			strings.Join(valueStrings, ","))
-
-		if _, err := tenantDB.ExecContext(ctx, stmt, valueArgs...); err != nil {
-			return fmt.Errorf("error bulk insert player_score: %w", err)
-		}
-	}
-
-	return c.JSON(http.StatusOK, SuccessResult{
-		Status: true,
-		Data:   ScoreHandlerResult{Rows: int64(len(playerScoreRows))},
-	})
-}
-
 type BillingHandlerResult struct {
 	Reports []BillingReport `json:"reports"`
 }
@@ -1264,11 +1181,11 @@ func playerHandler(c echo.Context) error {
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(v.tenantID)
+	tx, err := tenantDB.BeginTxx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("error flockByTenantID: %w", err)
+		return fmt.Errorf("error BeginTxx: %w", err)
 	}
-	defer fl.Close()
+	defer tx.Rollback()
 
 	// N+1問題を解消するために、JOINを使用して一括取得
 	type PlayerScoreWithCompetition struct {
@@ -1301,7 +1218,7 @@ func playerHandler(c echo.Context) error {
 	`
 
 	playerScores := []PlayerScoreWithCompetition{}
-	if err := tenantDB.SelectContext(
+	if err := tx.SelectContext(
 		ctx,
 		&playerScores,
 		query,
@@ -1318,6 +1235,10 @@ func playerHandler(c echo.Context) error {
 			CompetitionTitle: ps.CompetitionTitle,
 			Score:            ps.Score,
 		})
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("error Commit: %w", err)
 	}
 
 	res := SuccessResult{
@@ -1390,9 +1311,16 @@ func competitionRankingHandler(c echo.Context) error {
 		return fmt.Errorf("error Select tenant: id=%d, %w", v.tenantID, err)
 	}
 
-	if _, err := adminDB.ExecContext(
+	// トランザクション内でアクセス履歴の記録とランキングの取得を行う
+	tx, err := tenantDB.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("error BeginTxx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(
 		ctx,
-		"INSERT IGNORE INTO visit_history (player_id, tenant_id, competition_id, created_at, updated_at) VALUES (?, ?, ?, ?,?)",
+		"INSERT IGNORE INTO visit_history (player_id, tenant_id, competition_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
 		v.playerID, tenant.ID, competitionID, now, now,
 	); err != nil {
 		return fmt.Errorf(
@@ -1408,13 +1336,6 @@ func competitionRankingHandler(c echo.Context) error {
 			return fmt.Errorf("error strconv.ParseUint: rankAfterStr=%s, %w", rankAfterStr, err)
 		}
 	}
-
-	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(v.tenantID)
-	if err != nil {
-		return fmt.Errorf("error flockByTenantID: %w", err)
-	}
-	defer fl.Close()
 
 	// N+1問題を解消するために、プレイヤー情報を一括取得
 	// SQLでソートも行う
@@ -1458,13 +1379,17 @@ func competitionRankingHandler(c echo.Context) error {
 	`
 
 	rankedScores := []PlayerScoreWithRank{}
-	if err := tenantDB.SelectContext(
+	if err := tx.SelectContext(
 		ctx,
 		&rankedScores,
 		query,
 		tenant.ID, competitionID, tenant.ID, competitionID, rankAfter,
 	); err != nil {
 		return fmt.Errorf("error Select player_score with rank: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("error Commit: %w", err)
 	}
 
 	// ランキング結果を構築
