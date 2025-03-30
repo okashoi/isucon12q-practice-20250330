@@ -27,7 +27,7 @@ logs/clear:
 	sudo truncate --size 0 /var/log/nginx/error.log
 	# sudo truncate --size 0 /var/log/mysql/mysql-slow.log && sudo chmod 666 /var/log/mysql/mysql-slow.log
 	# sudo truncate --size 0 /var/log/mysql/error.log
-	ssh isucon-s2 "sudo truncate --size 0 /var/log/mysql/mysql-slow.log && chmod 666 /var/log/mysql/mysql-slow.log"
+	ssh isucon-s2 "sudo truncate --size 0 /var/log/mysql/mysql-slow.log && sudo  chmod 666 /var/log/mysql/mysql-slow.log"
 	ssh isucon-s2 "sudo truncate --size 0 /var/log/mysql/error.log"
 
 start-services:
