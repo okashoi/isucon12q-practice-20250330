@@ -81,7 +81,12 @@ func tenantDBPath(id int64) string {
 // テナントDBに接続する
 func connectToTenantDB(id int64) (*sqlx.DB, error) {
 	p := tenantDBPath(id)
-	db, err := sqlx.Open(sqliteDriverName, fmt.Sprintf("file:%s?mode=rw", p))
+	// 以下のオプションを追加
+	// _busy_timeout: ロックが解放されるまで待機する時間（ミリ秒）
+	// _journal_mode=WAL: Write-Ahead Loggingモードを使用して同時実行性を向上
+	// cache=shared: 接続間でページキャッシュを共有
+	dsn := fmt.Sprintf("file:%s?mode=rw&_busy_timeout=5000&_journal_mode=WAL&cache=shared", p)
+	db, err := sqlx.Open(sqliteDriverName, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open tenant DB: %w", err)
 	}
@@ -440,11 +445,11 @@ type PlayerScoreRow struct {
 }
 
 // 排他ロックする
-// トランザクションを開始し、そのトランザクションを返す
-func beginTransactionByTenantID(ctx context.Context, tenantID int64) (*sqlx.Tx, error) {
+// トランザクションを開始し、そのトランザクションとデータベース接続を返す
+func beginTransactionByTenantID(ctx context.Context, tenantID int64) (*sqlx.Tx, *sqlx.DB, error) {
 	db, err := connectToTenantDB(tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("error connectToTenantDB: %w", err)
+		return nil, nil, fmt.Errorf("error connectToTenantDB: %w", err)
 	}
 
 	tx, err := db.BeginTxx(ctx, &sql.TxOptions{
@@ -452,10 +457,10 @@ func beginTransactionByTenantID(ctx context.Context, tenantID int64) (*sqlx.Tx, 
 	})
 	if err != nil {
 		db.Close()
-		return nil, fmt.Errorf("error db.BeginTxx: %w", err)
+		return nil, nil, fmt.Errorf("error db.BeginTxx: %w", err)
 	}
 
-	return tx, nil
+	return tx, db, nil
 }
 
 type TenantsAddHandlerResult struct {
@@ -1057,10 +1062,11 @@ func competitionScoreHandler(c echo.Context) error {
 	}
 
 	// / DELETEしたタイミングで参照が来ると空っぽのランキングになるのでトランザクションを開始する
-	tx, err := beginTransactionByTenantID(ctx, v.tenantID)
+	tx, db, err := beginTransactionByTenantID(ctx, v.tenantID)
 	if err != nil {
 		return fmt.Errorf("error beginTransactionByTenantID: %w", err)
 	}
+	defer db.Close() // データベース接続を確実に閉じる
 	defer tx.Rollback()
 
 	var rowNum int64
@@ -1262,12 +1268,13 @@ func playerHandler(c echo.Context) error {
 	); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("error Select competition: %w", err)
 	}
-
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでトランザクションを開始する
-	tx, err := beginTransactionByTenantID(ctx, v.tenantID)
+	tx, db, err := beginTransactionByTenantID(ctx, v.tenantID)
 	if err != nil {
 		return fmt.Errorf("error beginTransactionByTenantID: %w", err)
 	}
+	defer db.Close() // データベース接続を確実に閉じる
+	defer tx.Rollback()
 	defer tx.Rollback()
 
 	// N+1問題を解消するために、JOINを使用して一括取得
@@ -1415,10 +1422,11 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでトランザクションを開始する
-	tx, err := beginTransactionByTenantID(ctx, v.tenantID)
+	tx, db, err := beginTransactionByTenantID(ctx, v.tenantID)
 	if err != nil {
 		return fmt.Errorf("error beginTransactionByTenantID: %w", err)
 	}
+	defer db.Close() // データベース接続を確実に閉じる
 	defer tx.Rollback()
 
 	// N+1問題を解消するために、プレイヤー情報を一括取得
