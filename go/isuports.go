@@ -1223,6 +1223,8 @@ func playerHandler(c echo.Context) error {
 	if playerID == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "player_id is required")
 	}
+
+	// プレイヤー情報の取得
 	p, err := retrievePlayer(ctx, tenantDB, playerID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1230,52 +1232,43 @@ func playerHandler(c echo.Context) error {
 		}
 		return fmt.Errorf("error retrievePlayer: %w", err)
 	}
-	cs := []CompetitionRow{}
+
+	// スコアと大会情報を1回のクエリで取得
+	type ScoreWithCompetition struct {
+		CompetitionTitle string `db:"competition_title"`
+		Score            int64  `db:"score"`
+	}
+
+	scores := []ScoreWithCompetition{}
 	if err := tenantDB.SelectContext(
 		ctx,
-		&cs,
-		"SELECT * FROM competition WHERE tenant_id = ? ORDER BY created_at ASC",
+		&scores,
+		`SELECT 
+			c.title as competition_title,
+			ps.score
+		FROM player_score ps
+		JOIN competition c ON c.id = ps.competition_id
+		WHERE ps.tenant_id = ? 
+		AND ps.player_id = ?
+		AND ps.row_num = (
+			SELECT MAX(row_num)
+			FROM player_score ps2
+			WHERE ps2.tenant_id = ps.tenant_id
+			AND ps2.competition_id = ps.competition_id
+			AND ps2.player_id = ps.player_id
+		)
+		ORDER BY c.created_at ASC`,
 		v.tenantID,
+		p.ID,
 	); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("error Select competition: %w", err)
+		return fmt.Errorf("error Select player_score with competition: %w", err)
 	}
 
-	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-	fl, err := flockByTenantID(v.tenantID)
-	if err != nil {
-		return fmt.Errorf("error flockByTenantID: %w", err)
-	}
-	defer fl.Close()
-	pss := make([]PlayerScoreRow, 0, len(cs))
-	for _, c := range cs {
-		ps := PlayerScoreRow{}
-		if err := tenantDB.GetContext(
-			ctx,
-			&ps,
-			// 最後にCSVに登場したスコアを採用する = row_numが一番大きいもの
-			"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? AND player_id = ? ORDER BY row_num DESC LIMIT 1",
-			v.tenantID,
-			c.ID,
-			p.ID,
-		); err != nil {
-			// 行がない = スコアが記録されてない
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			return fmt.Errorf("error Select player_score: tenantID=%d, competitionID=%s, playerID=%s, %w", v.tenantID, c.ID, p.ID, err)
-		}
-		pss = append(pss, ps)
-	}
-
-	psds := make([]PlayerScoreDetail, 0, len(pss))
-	for _, ps := range pss {
-		comp, err := retrieveCompetition(ctx, tenantDB, ps.CompetitionID)
-		if err != nil {
-			return fmt.Errorf("error retrieveCompetition: %w", err)
-		}
+	psds := make([]PlayerScoreDetail, 0, len(scores))
+	for _, s := range scores {
 		psds = append(psds, PlayerScoreDetail{
-			CompetitionTitle: comp.Title,
-			Score:            ps.Score,
+			CompetitionTitle: s.CompetitionTitle,
+			Score:            s.Score,
 		})
 	}
 
