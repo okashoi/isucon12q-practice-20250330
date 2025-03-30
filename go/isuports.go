@@ -247,6 +247,7 @@ type Viewer struct {
 	playerID   string
 	tenantName string
 	tenantID   int64
+	IsAdmin    bool
 }
 
 // リクエストヘッダをパースしてViewerを返す
@@ -332,6 +333,7 @@ func parseViewer(c echo.Context) (*Viewer, error) {
 		playerID:   token.Subject(),
 		tenantName: tenant.Name,
 		tenantID:   tenant.ID,
+		IsAdmin:    role == RoleAdmin,
 	}
 	return v, nil
 }
@@ -374,6 +376,7 @@ type dbOrTx interface {
 	GetContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error
 	SelectContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error
 	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	BeginTxx(ctx context.Context, opts *sql.TxOptions) (*sqlx.Tx, error)
 }
 
 type PlayerRow struct {
@@ -1621,4 +1624,86 @@ func initializeHandler(c echo.Context) error {
 		Lang: "go",
 	}
 	return c.JSON(http.StatusOK, SuccessResult{Status: true, Data: res})
+}
+
+type TenantsAddHandlerResult struct {
+	Tenant TenantWithBilling `json:"tenant"`
+}
+
+func tenantsAddHandler(c echo.Context) error {
+	v := c.Get("viewer")
+	if v == nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "not logged in")
+	}
+	viewer := v.(*Viewer)
+	if !viewer.IsAdmin {
+		return echo.NewHTTPError(http.StatusForbidden, "not admin")
+	}
+
+	req := struct {
+		Name string `json:"name"`
+	}{}
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+
+	if req.Name == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "name is required")
+	}
+
+	if !validateTenantName(req.Name) {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid tenant name")
+	}
+
+	ctx := c.Request().Context()
+	tx, err := adminDB.BeginTxx(ctx, nil)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	defer tx.Rollback()
+
+	// テナント名の重複チェック
+	exists := false
+	err = tx.GetContext(ctx, &exists, "SELECT EXISTS(SELECT 1 FROM tenant WHERE name = ?)", req.Name)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if exists {
+		return echo.NewHTTPError(http.StatusBadRequest, "tenant name already exists")
+	}
+
+	// テナントの作成
+	result, err := tx.ExecContext(ctx, "INSERT INTO tenant (name, display_name, created_at, updated_at) VALUES (?, ?, NOW(), NOW())", req.Name, req.Name)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	// テナントDBの作成
+	if err := createTenantDB(id); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	var tenant TenantWithBilling
+	err = tx.GetContext(ctx, &tenant, "SELECT * FROM tenant WHERE id = ?", id)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	if err := tx.Commit(); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	return c.JSON(http.StatusOK, TenantsAddHandlerResult{
+		Tenant: tenant,
+	})
+}
+
+func validateTenantName(name string) bool {
+	matched, _ := regexp.MatchString(`^[a-zA-Z0-9][a-zA-Z0-9-_.]*$`, name)
+	return matched
 }
