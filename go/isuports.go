@@ -274,6 +274,9 @@ func parseViewer(c echo.Context) (*Viewer, error) {
 	}
 	// aud は1要素でテナント名がはいっている
 	aud := token.Audience()
+	fmt.Println("aaaa")
+	fmt.Println(aud)
+	fmt.Println("aaaa")
 	if len(aud) != 1 {
 		return nil, echo.NewHTTPError(
 			http.StatusUnauthorized,
