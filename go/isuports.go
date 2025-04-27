@@ -334,8 +334,8 @@ func initTenantCache() {
 	}
 	tenantCacheMu.Lock()
 	tenantCache = map[string]*TenantRow{}
-	for _, tenant := range tenants {
-		tenantCache[tenant.Name] = &tenant
+	for _, t := range tenants {
+		tenantCache[t.Name] = &t
 	}
 	tenantCacheMu.Unlock()
 }
