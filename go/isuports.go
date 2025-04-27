@@ -127,8 +127,6 @@ func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 
 // Run は cmd/isuports/main.go から呼ばれるエントリーポイントです
 func Run() {
-	initTenantCache()
-
 	http.DefaultServeMux.Handle("/debug/fgprof", fgprof.Handler())
 	go func() {
 		if err := http.ListenAndServe(":6060", nil); err != nil {
@@ -195,6 +193,8 @@ func Run() {
 	adminDB.SetMaxIdleConns(100)
 	adminDB.SetConnMaxLifetime(5 * time.Minute)
 	defer adminDB.Close()
+
+	initTenantCache()
 
 	port := getEnv("SERVER_APP_PORT", "3000")
 	e.Logger.Infof("starting isuports server on : %s ...", port)
