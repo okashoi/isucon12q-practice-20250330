@@ -989,6 +989,7 @@ func competitionScoreHandler(c echo.Context) error {
 		return fmt.Errorf("error beginTransactionByTenantID: %w", err)
 	}
 	defer db.MustBegin()
+	defer tx.Rollback()
 
 	var rowNum int64
 	playerScoreRows := []PlayerScoreRow{}
@@ -1183,6 +1184,7 @@ func playerHandler(c echo.Context) error {
 		return fmt.Errorf("error beginTransactionByTenantID: %w", err)
 	}
 	defer db.MustBegin()
+	defer tx.Rollback()
 
 	// N+1問題を解消するために、JOINを使用して一括取得
 	type PlayerScoreWithCompetition struct {
@@ -1328,6 +1330,7 @@ func competitionRankingHandler(c echo.Context) error {
 		return fmt.Errorf("error beginTransactionByTenantID: %w", err)
 	}
 	defer db.MustBegin()
+	defer tx.Rollback()
 
 	// N+1問題を解消するために、プレイヤー情報を一括取得
 	// SQLでソートも行う
