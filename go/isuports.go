@@ -328,7 +328,7 @@ var (
 )
 
 func initTenantCache() {
-	tenants := []TenantRow{}
+	var tenants []TenantRow
 	if err := adminDB.Select(&tenants, "SELECT * FROM tenant"); err != nil {
 		panic(err)
 	}
