@@ -1064,8 +1064,16 @@ func competitionScoreHandler(c echo.Context) error {
 	defer db.Close() // データベース接続を確実に閉じる
 	defer tx.Rollback()
 
+	// CSVの内容を一時的に保存し、プレイヤーIDを収集
+	type tempScore struct {
+		PlayerID string
+		Score    int64
+		RowNum   int64
+	}
+	var tempScores []tempScore
+	playerIDs := make(map[string]struct{})
+
 	var rowNum int64
-	playerScoreRows := []PlayerScoreRow{}
 	for {
 		rowNum++
 		row, err := r.Read()
@@ -1079,16 +1087,7 @@ func competitionScoreHandler(c echo.Context) error {
 			return fmt.Errorf("row must have two columns: %#v", row)
 		}
 		playerID, scoreStr := row[0], row[1]
-		if _, err := retrievePlayer(ctx, tx, playerID); err != nil {
-			// 存在しない参加者が含まれている
-			if errors.Is(err, sql.ErrNoRows) {
-				return echo.NewHTTPError(
-					http.StatusBadRequest,
-					fmt.Sprintf("player not found: %s", playerID),
-				)
-			}
-			return fmt.Errorf("error retrievePlayer: %w", err)
-		}
+
 		var score int64
 		if score, err = strconv.ParseInt(scoreStr, 10, 64); err != nil {
 			return echo.NewHTTPError(
@@ -1096,6 +1095,45 @@ func competitionScoreHandler(c echo.Context) error {
 				fmt.Sprintf("error strconv.ParseUint: scoreStr=%s, %s", scoreStr, err),
 			)
 		}
+
+		tempScores = append(tempScores, tempScore{
+			PlayerID: playerID,
+			Score:    score,
+			RowNum:   rowNum,
+		})
+		playerIDs[playerID] = struct{}{}
+	}
+
+	// プレイヤー情報を一括で取得
+	query := "SELECT id FROM player WHERE id IN (?" + strings.Repeat(",?", len(playerIDs)-1) + ")"
+	args := make([]interface{}, 0, len(playerIDs))
+	for playerID := range playerIDs {
+		args = append(args, playerID)
+	}
+
+	existingPlayers := make(map[string]struct{})
+	var playerRows []struct {
+		ID string `db:"id"`
+	}
+	if err := tx.SelectContext(ctx, &playerRows, query, args...); err != nil {
+		return fmt.Errorf("error Select players: %w", err)
+	}
+	for _, p := range playerRows {
+		existingPlayers[p.ID] = struct{}{}
+	}
+
+	// 存在しないプレイヤーをチェック
+	for _, ts := range tempScores {
+		if _, exists := existingPlayers[ts.PlayerID]; !exists {
+			return echo.NewHTTPError(
+				http.StatusBadRequest,
+				fmt.Sprintf("player not found: %s", ts.PlayerID),
+			)
+		}
+	}
+
+	playerScoreRows := make([]PlayerScoreRow, 0, len(tempScores))
+	for _, ts := range tempScores {
 		id, err := dispenseID(ctx)
 		if err != nil {
 			return fmt.Errorf("error dispenseID: %w", err)
@@ -1104,10 +1142,10 @@ func competitionScoreHandler(c echo.Context) error {
 		playerScoreRows = append(playerScoreRows, PlayerScoreRow{
 			ID:            id,
 			TenantID:      v.tenantID,
-			PlayerID:      playerID,
+			PlayerID:      ts.PlayerID,
 			CompetitionID: competitionID,
-			Score:         score,
-			RowNum:        rowNum,
+			Score:         ts.Score,
+			RowNum:        ts.RowNum,
 			CreatedAt:     now,
 			UpdatedAt:     now,
 		})
