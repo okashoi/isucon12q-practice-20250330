@@ -307,6 +307,7 @@ func parseViewer(c echo.Context) (*Viewer, error) {
 	}
 
 	if tenant.Name != aud[0] {
+		log.Printf("tenantName: %s, aud[0]: %s", tenant.Name, aud[0])
 		return nil, echo.NewHTTPError(
 			http.StatusUnauthorized,
 			fmt.Sprintf("invalid token: tenant name is not match with %s: %s", c.Request().Host, tokenStr),
