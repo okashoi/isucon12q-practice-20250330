@@ -176,8 +176,8 @@ func Run() {
 		e.Logger.Fatalf("failed to connect db: %v", err)
 		return
 	}
-	tenantDB.SetMaxOpenConns(20)
-	tenantDB.SetMaxIdleConns(20)
+	tenantDB.SetMaxOpenConns(100)
+	tenantDB.SetMaxIdleConns(100)
 	tenantDB.SetConnMaxLifetime(5 * time.Minute)
 	defer tenantDB.Close()
 
@@ -613,14 +613,13 @@ func tenantsBillingHandler(c echo.Context) error {
 		)
 	}
 
-	fmt.Println("ここまで来た1 ")
 	ctx := context.Background()
 	if v, err := parseViewer(c); err != nil {
 		return err
 	} else if v.role != RoleAdmin {
 		return echo.NewHTTPError(http.StatusForbidden, "admin role required")
 	}
-	fmt.Println("ここまで来た2 ")
+
 	before := c.QueryParam("before")
 	var beforeID int64
 	if before != "" {
@@ -633,7 +632,6 @@ func tenantsBillingHandler(c echo.Context) error {
 			)
 		}
 	}
-	fmt.Println("ここまで来た3 ")
 	// テナントごとに
 	//   大会ごとに
 	//     scoreが登録されているplayer * 100
@@ -644,13 +642,11 @@ func tenantsBillingHandler(c echo.Context) error {
 	if err := adminDB.SelectContext(ctx, &ts, "SELECT * FROM tenant ORDER BY id DESC"); err != nil {
 		return fmt.Errorf("error Select tenant: %w", err)
 	}
-	fmt.Println("ここまで来た4// ")
 	tenantBillings := make([]TenantWithBilling, 0, len(ts))
 	for _, t := range ts {
 		if beforeID != 0 && beforeID <= t.ID {
 			continue
 		}
-		fmt.Println("ここまで来た5 ")
 		err := func(t TenantRow) error {
 			tb := TenantWithBilling{
 				ID:          strconv.FormatInt(t.ID, 10),
