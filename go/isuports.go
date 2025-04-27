@@ -6,8 +6,6 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
-	"github.com/felixge/fgprof"
-	"github.com/google/uuid"
 	"io"
 	"net/http"
 	_ "net/http/pprof"
@@ -18,7 +16,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/felixge/fgprof"
+	"github.com/google/uuid"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
@@ -192,6 +194,8 @@ func Run() {
 	adminDB.SetConnMaxLifetime(5 * time.Minute)
 	defer adminDB.Close()
 
+	initTenantCache()
+
 	port := getEnv("SERVER_APP_PORT", "3000")
 	e.Logger.Infof("starting isuports server on : %s ...", port)
 	serverPort := fmt.Sprintf(":%s", port)
@@ -303,6 +307,7 @@ func parseViewer(c echo.Context) (*Viewer, error) {
 	}
 
 	if tenant.Name != aud[0] {
+		log.Printf("host: %s, tenantName: %s, aud[0]: %s", c.Request().Host, tenant.Name, aud[0])
 		return nil, echo.NewHTTPError(
 			http.StatusUnauthorized,
 			fmt.Sprintf("invalid token: tenant name is not match with %s: %s", c.Request().Host, tokenStr),
@@ -316,6 +321,40 @@ func parseViewer(c echo.Context) (*Viewer, error) {
 		tenantID:   tenant.ID,
 	}
 	return v, nil
+}
+
+var (
+	tenantCache   = map[string]TenantRow{} // キャッシュキー: テナント名
+	tenantCacheMu = sync.RWMutex{}
+)
+
+func initTenantCache() {
+	var tenants []TenantRow
+	if err := adminDB.Select(&tenants, "SELECT * FROM tenant"); err != nil {
+		panic(err)
+	}
+	tenantCacheMu.Lock()
+	tenantCache = map[string]TenantRow{}
+	for _, t := range tenants {
+		tenantCache[t.Name] = t
+	}
+	tenantCacheMu.Unlock()
+}
+
+func getTenantCache(tenantName string) *TenantRow {
+	tenantCacheMu.RLock()
+	defer tenantCacheMu.RUnlock()
+	tenant, ok := tenantCache[tenantName]
+	if !ok {
+		return nil
+	}
+	return &tenant
+}
+
+func setTenantCache(tenant *TenantRow) {
+	tenantCacheMu.Lock()
+	defer tenantCacheMu.Unlock()
+	tenantCache[tenant.Name] = *tenant
 }
 
 func retrieveTenantRowFromHeader(c echo.Context) (*TenantRow, error) {
@@ -332,6 +371,10 @@ func retrieveTenantRowFromHeader(c echo.Context) (*TenantRow, error) {
 	}
 
 	// テナントの存在確認
+	if tenant := getTenantCache(tenantName); tenant != nil {
+		return tenant, nil
+	}
+
 	var tenant TenantRow
 	if err := adminDB.GetContext(
 		context.Background(),
@@ -341,6 +384,9 @@ func retrieveTenantRowFromHeader(c echo.Context) (*TenantRow, error) {
 	); err != nil {
 		return nil, fmt.Errorf("failed to Select tenant: name=%s, %w", tenantName, err)
 	}
+
+	setTenantCache(&tenant)
+
 	return &tenant, nil
 }
 
@@ -1685,6 +1731,8 @@ func initializeHandler(c echo.Context) error {
 			}
 		}
 	}
+
+	initTenantCache()
 
 	res := InitializeHandlerResult{
 		Lang: "go",
