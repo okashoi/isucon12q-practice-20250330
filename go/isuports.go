@@ -68,6 +68,7 @@ func connectAdminDB() (*sqlx.DB, error) {
 	config.Passwd = getEnv("ISUCON_DB_PASSWORD", "isucon")
 	config.DBName = getEnv("ISUCON_DB_NAME", "isuports")
 	config.ParseTime = true
+	config.InterpolateParams = true
 	dsn := config.FormatDSN()
 	return sqlx.Open("mysql", dsn)
 }
@@ -186,8 +187,8 @@ func Run() {
 		e.Logger.Fatalf("failed to connect db: %v", err)
 		return
 	}
-	adminDB.SetMaxOpenConns(20)
-	adminDB.SetMaxIdleConns(20)
+	adminDB.SetMaxOpenConns(100)
+	adminDB.SetMaxIdleConns(100)
 	adminDB.SetConnMaxLifetime(5 * time.Minute)
 	defer adminDB.Close()
 
