@@ -1325,12 +1325,12 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでトランザクションを開始する
-	tx, db, err := beginTransactionByTenantID(ctx)
-	if err != nil {
-		return fmt.Errorf("error beginTransactionByTenantID: %w", err)
-	}
-	defer db.MustBegin()
-	defer tx.Rollback()
+	//tx, db, err := beginTransactionByTenantID(ctx)
+	//if err != nil {
+	//	return fmt.Errorf("error beginTransactionByTenantID: %w", err)
+	//}
+	//defer db.MustBegin()
+	//defer tx.Rollback()
 
 	// N+1問題を解消するために、プレイヤー情報を一括取得
 	// SQLでソートも行う
@@ -1395,9 +1395,9 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 
 	// トランザクションをコミット
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("error tx.Commit: %w", err)
-	}
+	//if err := tx.Commit(); err != nil {
+	//	return fmt.Errorf("error tx.Commit: %w", err)
+	//}
 
 	res := SuccessResult{
 		Status: true,
