@@ -274,9 +274,6 @@ func parseViewer(c echo.Context) (*Viewer, error) {
 	}
 	// aud は1要素でテナント名がはいっている
 	aud := token.Audience()
-	fmt.Println("aaaa")
-	fmt.Println(aud)
-	fmt.Println("aaaa")
 	if len(aud) != 1 {
 		return nil, echo.NewHTTPError(
 			http.StatusUnauthorized,
@@ -293,6 +290,11 @@ func parseViewer(c echo.Context) (*Viewer, error) {
 	if tenant.Name == "admin" && role != RoleAdmin {
 		return nil, echo.NewHTTPError(http.StatusUnauthorized, "tenant not found")
 	}
+
+	fmt.Println("aaaaaaaaaaaa")
+	fmt.Println(tenant.Name)
+	fmt.Println(aud[0])
+	fmt.Println("aaaaaaaaaaaa")
 
 	if tenant.Name != aud[0] {
 		return nil, echo.NewHTTPError(
