@@ -324,7 +324,7 @@ func parseViewer(c echo.Context) (*Viewer, error) {
 }
 
 var (
-	tenantCache   = map[string]*TenantRow{} // キャッシュキー: テナント名
+	tenantCache   = map[string]TenantRow{} // キャッシュキー: テナント名
 	tenantCacheMu = sync.RWMutex{}
 )
 
@@ -334,9 +334,9 @@ func initTenantCache() {
 		panic(err)
 	}
 	tenantCacheMu.Lock()
-	tenantCache = map[string]*TenantRow{}
+	tenantCache = map[string]TenantRow{}
 	for _, t := range tenants {
-		tenantCache[t.Name] = &t
+		tenantCache[t.Name] = t
 	}
 	tenantCacheMu.Unlock()
 }
@@ -344,13 +344,17 @@ func initTenantCache() {
 func getTenantCache(tenantName string) *TenantRow {
 	tenantCacheMu.RLock()
 	defer tenantCacheMu.RUnlock()
-	return tenantCache[tenantName]
+	tenant, ok := tenantCache[tenantName]
+	if !ok {
+		return nil
+	}
+	return &tenant
 }
 
 func setTenantCache(tenant *TenantRow) {
 	tenantCacheMu.Lock()
 	defer tenantCacheMu.Unlock()
-	tenantCache[tenant.Name] = tenant
+	tenantCache[tenant.Name] = *tenant
 }
 
 func retrieveTenantRowFromHeader(c echo.Context) (*TenantRow, error) {
