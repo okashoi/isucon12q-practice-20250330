@@ -6,8 +6,6 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
-	"github.com/felixge/fgprof"
-	"github.com/google/uuid"
 	"io"
 	"net/http"
 	_ "net/http/pprof"
@@ -18,7 +16,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/felixge/fgprof"
+	"github.com/google/uuid"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
@@ -125,6 +127,8 @@ func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 
 // Run は cmd/isuports/main.go から呼ばれるエントリーポイントです
 func Run() {
+	initTenantCache()
+
 	http.DefaultServeMux.Handle("/debug/fgprof", fgprof.Handler())
 	go func() {
 		if err := http.ListenAndServe(":6060", nil); err != nil {
@@ -318,6 +322,36 @@ func parseViewer(c echo.Context) (*Viewer, error) {
 	return v, nil
 }
 
+var (
+	tenantCache   = map[string]*TenantRow{} // キャッシュキー: テナント名
+	tenantCacheMu = sync.RWMutex{}
+)
+
+func initTenantCache() {
+	tenants := []TenantRow{}
+	if err := adminDB.Select(&tenants, "SELECT * FROM tenant"); err != nil {
+		panic(err)
+	}
+	tenantCacheMu.Lock()
+	tenantCache = map[string]*TenantRow{}
+	for _, tenant := range tenants {
+		tenantCache[tenant.Name] = &tenant
+	}
+	tenantCacheMu.Unlock()
+}
+
+func getTenantCache(tenantName string) *TenantRow {
+	tenantCacheMu.RLock()
+	defer tenantCacheMu.RUnlock()
+	return tenantCache[tenantName]
+}
+
+func setTenantCache(tenant *TenantRow) {
+	tenantCacheMu.Lock()
+	defer tenantCacheMu.Unlock()
+	tenantCache[tenant.Name] = tenant
+}
+
 func retrieveTenantRowFromHeader(c echo.Context) (*TenantRow, error) {
 	// JWTに入っているテナント名とHostヘッダのテナント名が一致しているか確認
 	baseHost := getEnv("ISUCON_BASE_HOSTNAME", ".t.isucon.local")
@@ -332,6 +366,10 @@ func retrieveTenantRowFromHeader(c echo.Context) (*TenantRow, error) {
 	}
 
 	// テナントの存在確認
+	if tenant := getTenantCache(tenantName); tenant != nil {
+		return tenant, nil
+	}
+
 	var tenant TenantRow
 	if err := adminDB.GetContext(
 		context.Background(),
@@ -341,6 +379,9 @@ func retrieveTenantRowFromHeader(c echo.Context) (*TenantRow, error) {
 	); err != nil {
 		return nil, fmt.Errorf("failed to Select tenant: name=%s, %w", tenantName, err)
 	}
+
+	setTenantCache(&tenant)
+
 	return &tenant, nil
 }
 
@@ -1685,6 +1726,8 @@ func initializeHandler(c echo.Context) error {
 			}
 		}
 	}
+
+	initTenantCache()
 
 	res := InitializeHandlerResult{
 		Lang: "go",
