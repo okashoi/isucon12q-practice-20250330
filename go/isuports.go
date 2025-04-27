@@ -412,14 +412,13 @@ type PlayerScoreRow struct {
 
 // 排他ロックする
 // トランザクションを開始し、そのトランザクションとデータベース接続を返す
-func beginTransactionByTenantID(ctx context.Context, tenantID int64) (*sqlx.Tx, *sqlx.DB, error) {
+func beginTransactionByTenantID(ctx context.Context) (*sqlx.Tx, *sqlx.DB, error) {
 	db := tenantDB
 
 	tx, err := db.BeginTxx(ctx, &sql.TxOptions{
 		Isolation: sql.LevelSerializable,
 	})
 	if err != nil {
-		db.Close()
 		return nil, nil, fmt.Errorf("error db.BeginTxx: %w", err)
 	}
 
@@ -985,12 +984,11 @@ func competitionScoreHandler(c echo.Context) error {
 	}
 
 	// / DELETEしたタイミングで参照が来ると空っぽのランキングになるのでトランザクションを開始する
-	tx, db, err := beginTransactionByTenantID(ctx, v.tenantID)
+	tx, db, err := beginTransactionByTenantID(ctx)
 	if err != nil {
 		return fmt.Errorf("error beginTransactionByTenantID: %w", err)
 	}
-	defer db.Close() // データベース接続を確実に閉じる
-	defer tx.Rollback()
+	defer db.MustBegin()
 
 	var rowNum int64
 	playerScoreRows := []PlayerScoreRow{}
@@ -1180,12 +1178,11 @@ func playerHandler(c echo.Context) error {
 		return fmt.Errorf("error Select competition: %w", err)
 	}
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでトランザクションを開始する
-	tx, db, err := beginTransactionByTenantID(ctx, v.tenantID)
+	tx, db, err := beginTransactionByTenantID(ctx)
 	if err != nil {
 		return fmt.Errorf("error beginTransactionByTenantID: %w", err)
 	}
-	defer db.Close() // データベース接続を確実に閉じる
-	defer tx.Rollback()
+	defer db.MustBegin()
 
 	// N+1問題を解消するために、JOINを使用して一括取得
 	type PlayerScoreWithCompetition struct {
@@ -1326,12 +1323,11 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでトランザクションを開始する
-	tx, db, err := beginTransactionByTenantID(ctx, v.tenantID)
+	tx, db, err := beginTransactionByTenantID(ctx)
 	if err != nil {
 		return fmt.Errorf("error beginTransactionByTenantID: %w", err)
 	}
-	defer db.Close() // データベース接続を確実に閉じる
-	defer tx.Rollback()
+	defer db.MustBegin()
 
 	// N+1問題を解消するために、プレイヤー情報を一括取得
 	// SQLでソートも行う
